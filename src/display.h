@@ -1,13 +1,16 @@
 #pragma once
 #include <M5StickCPlus.h>
 #include "wifi_scanner.h"
+#include "csi_collector.h"
 
 static constexpr int SCREEN_W = 240;
 static constexpr int SCREEN_H = 135;
 
 enum class AppScreen {
     NETWORK_LIST,
-    MONITOR
+    MONITOR,
+    CSI_WATERFALL,
+    CSI_EQUALIZER
 };
 
 class Display {
@@ -15,6 +18,8 @@ public:
     void begin();
     void drawNetworkList(const ScanResult& result, int selectedIndex);
     void drawMonitor(const WifiScanner& scanner, bool buzzerOn);
+    void drawCSIWaterfall(const String& ssid, int channel, const CSICollector& csi, bool buzzerOn);
+    void drawCSIEqualizer(const String& ssid, int channel, const CSICollector& csi, bool buzzerOn);
     void drawSplash();
     void drawScanning();
 
@@ -28,4 +33,5 @@ private:
     void drawSignalBar(int x, int y, int w, int h, int32_t rssi);
     void drawHistoryGraph(int x, int y, int w, int h, const WifiScanner& scanner);
     void drawBattery(int x, int y);
+    void drawCSIFooter(int32_t rssi, bool buzzerOn, int pktPerSec);
 };

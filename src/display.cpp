@@ -1,7 +1,7 @@
 #include "display.h"
 
 void Display::begin() {
-    M5.Lcd.setRotation(3);
+    M5.Lcd.setRotation(1);
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextColor(WHITE, BLACK);
 }
@@ -211,6 +211,169 @@ void Display::drawHistoryGraph(int x, int y, int w, int h, const WifiScanner& sc
         }
         prevPy = py;
     }
+}
+
+// Heatmap: black → blue → cyan → green → yellow → red → white
+static uint16_t heatColor(uint8_t v) {
+    uint8_t r, g, b;
+    if (v < 51) {           // black → blue
+        r = 0; g = 0; b = v * 5;
+    } else if (v < 102) {   // blue → cyan
+        uint8_t t = (v - 51) * 5;
+        r = 0; g = t; b = 255;
+    } else if (v < 153) {   // cyan → green
+        uint8_t t = (v - 102) * 5;
+        r = 0; g = 255; b = 255 - t;
+    } else if (v < 204) {   // green → yellow
+        uint8_t t = (v - 153) * 5;
+        r = t; g = 255; b = 0;
+    } else {                 // yellow → red
+        uint8_t t = (v - 204) * 5;
+        r = 255; g = 255 - t; b = 0;
+    }
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+void Display::drawCSIFooter(int32_t rssi, bool buzzerOn, int pktPerSec) {
+    _sprite.setTextSize(1);
+    _sprite.setTextColor(rssiColor(rssi));
+    char rssiStr[24];
+    snprintf(rssiStr, sizeof(rssiStr), "%ddBm %dpkt/s", (int)rssi, pktPerSec);
+    _sprite.setTextDatum(BL_DATUM);
+    _sprite.drawString(rssiStr, 2, SCREEN_H - 1);
+
+    _sprite.setTextColor(TFT_DARKGREY);
+    _sprite.setTextDatum(BR_DATUM);
+    _sprite.drawString("B:bzr PWR:view", SCREEN_W - 2, SCREEN_H - 1);
+}
+
+void Display::drawCSIWaterfall(const String& ssid, int channel, const CSICollector& csi, bool buzzerOn) {
+    ensureSprite();
+    _sprite.fillSprite(BLACK);
+    _sprite.setTextDatum(TL_DATUM);
+    _sprite.setTextSize(1);
+
+    // Header
+    _sprite.setTextColor(TFT_CYAN);
+    char topBar[56];
+    snprintf(topBar, sizeof(topBar), "%s CH:%d %s%s",
+             ssid.c_str(), channel,
+             csi.isConnected() ? "[CONN] " : "[PASV] ",
+             buzzerOn ? "[BZR]" : "");
+    _sprite.drawString(topBar, 2, 2);
+    drawBattery(SCREEN_W - 28, 2);
+
+    // Waterfall area — two halves (lower/upper subcarriers) with DC divider
+    static constexpr int TOP_Y = 13;
+    static constexpr int BOT_Y = SCREEN_H - 11;
+    static constexpr int DC_GAP = 1;
+    int wfHeight = BOT_Y - TOP_Y;
+    int numLeft = CSI_ACTIVE_LEFT;
+    int numRight = CSI_ACTIVE_RIGHT;
+    int availW = SCREEN_W - DC_GAP;
+    int cellW = availW / (numLeft + numRight);
+    if (cellW < 1) cellW = 1;
+    int leftW = numLeft * cellW;
+    int rightW = numRight * cellW;
+    int totalW = leftW + DC_GAP + rightW;
+    int startX = (SCREEN_W - totalW) / 2;
+    int dcX = startX + leftW;
+
+    // Draw waterfall: newest row at top, oldest at bottom
+    int rows = min((int)csi.rowCount, wfHeight);
+    for (int r = 0; r < rows; r++) {
+        int bufIdx = ((int)csi.head - 1 - r + CSI_WATERFALL_ROWS) % CSI_WATERFALL_ROWS;
+        int y = TOP_Y + r;
+        const uint8_t* row = csi.waterfall[bufIdx];
+
+        for (int s = 0; s < numLeft; s++) {
+            _sprite.fillRect(startX + s * cellW, y, cellW, 1, heatColor(row[s]));
+        }
+        for (int s = 0; s < numRight; s++) {
+            _sprite.fillRect(dcX + DC_GAP + s * cellW, y, cellW, 1, heatColor(row[numLeft + s]));
+        }
+    }
+
+    // DC divider line
+    _sprite.drawFastVLine(dcX, TOP_Y, wfHeight, 0x4208);
+
+    drawCSIFooter(csi.latestRSSI, buzzerOn, csi.pktPerSec);
+    _sprite.pushSprite(0, 0);
+}
+
+void Display::drawCSIEqualizer(const String& ssid, int channel, const CSICollector& csi, bool buzzerOn) {
+    ensureSprite();
+    _sprite.fillSprite(BLACK);
+    _sprite.setTextDatum(TL_DATUM);
+    _sprite.setTextSize(1);
+
+    // Header
+    _sprite.setTextColor(TFT_CYAN);
+    char topBar[56];
+    snprintf(topBar, sizeof(topBar), "%s CH:%d %s%s",
+             ssid.c_str(), channel,
+             csi.isConnected() ? "[CONN] " : "[PASV] ",
+             buzzerOn ? "[BZR]" : "");
+    _sprite.drawString(topBar, 2, 2);
+    drawBattery(SCREEN_W - 28, 2);
+
+    // Equalizer area
+    static constexpr int TOP_Y = 14;
+    static constexpr int BOT_Y = SCREEN_H - 12;
+    static constexpr int BAR_MAX_H = BOT_Y - TOP_Y;
+    int numBars = csi.activeCount > 0 ? csi.activeCount : CSI_ACTIVE_SUB;
+    int barW = SCREEN_W / numBars;
+    if (barW < 2) barW = 2;
+    int totalW = numBars * barW;
+    int startX = (SCREEN_W - totalW) / 2;
+
+    for (int i = 0; i < numBars; i++) {
+        float amp = csi.amplitudes[i];
+        if (amp < 0.0f) amp = 0.0f;
+        if (amp > 1.0f) amp = 1.0f;
+
+        int barH = (int)(amp * BAR_MAX_H);
+        if (barH < 1 && amp > 0.01f) barH = 1;
+
+        int x = startX + i * barW;
+        int bw = barW > 1 ? barW - 1 : 1;
+
+        if (barH > 0) {
+            int greenH = min(barH, (int)(BAR_MAX_H * 0.4f));
+            int yellowH = min(barH, (int)(BAR_MAX_H * 0.7f)) - greenH;
+            int redH = barH - greenH - (yellowH > 0 ? yellowH : 0);
+            if (yellowH < 0) yellowH = 0;
+            if (redH < 0) redH = 0;
+
+            int y = BOT_Y;
+            if (greenH > 0) {
+                _sprite.fillRect(x, y - greenH, bw, greenH, TFT_GREEN);
+                y -= greenH;
+            }
+            if (yellowH > 0) {
+                _sprite.fillRect(x, y - yellowH, bw, yellowH, TFT_YELLOW);
+                y -= yellowH;
+            }
+            if (redH > 0) {
+                _sprite.fillRect(x, y - redH, bw, redH, TFT_RED);
+            }
+        }
+
+        // Peak hold indicator
+        float peak = csi.peaks[i];
+        if (peak > 1.0f) peak = 1.0f;
+        int peakY = BOT_Y - (int)(peak * BAR_MAX_H);
+        if (peak > 0.02f) {
+            _sprite.drawFastHLine(x, peakY, barW > 1 ? barW - 1 : 1, TFT_WHITE);
+        }
+    }
+
+    // DC divider
+    int dcBarX = startX + CSI_ACTIVE_LEFT * barW;
+    _sprite.drawFastVLine(dcBarX - 1, TOP_Y, BAR_MAX_H, 0x4208);
+
+    drawCSIFooter(csi.latestRSSI, buzzerOn, csi.pktPerSec);
+    _sprite.pushSprite(0, 0);
 }
 
 void Display::drawBattery(int x, int y) {

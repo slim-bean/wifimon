@@ -11,6 +11,7 @@ struct NetworkInfo {
     String ssid;
     int32_t rssi;
     uint8_t channel;
+    uint8_t bssid[6];
     wifi_auth_mode_t encryption;
 };
 
@@ -32,11 +33,12 @@ public:
     bool isScanComplete();
     ScanResult getResults();
 
-    void lockNetwork(const String& ssid, uint8_t channel);
+    void lockNetwork(const String& ssid, uint8_t channel, const uint8_t* bssid);
     void unlockNetwork();
     bool isLocked() const { return _locked; }
     const String& lockedSSID() const { return _lockedSSID; }
     int lockedChannel() const { return _lockedChannel; }
+    const uint8_t* lockedBSSID() const { return _lockedBSSID; }
 
     int32_t getLockedRSSI() const { return _smoothedRSSI; }
     int32_t getLockedRSSIRaw() const { return _rawRSSI; }
@@ -56,6 +58,7 @@ private:
     bool _locked = false;
     String _lockedSSID;
     uint8_t _lockedChannel = 0;
+    uint8_t _lockedBSSID[6] = {};
 
     int32_t _rawRSSI = -100;
     int32_t _smoothedRSSI = -100;

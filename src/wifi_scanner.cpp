@@ -42,15 +42,20 @@ ScanResult WifiScanner::getResults() {
         result.networks[i].rssi = WiFi.RSSI(i);
         result.networks[i].channel = WiFi.channel(i);
         result.networks[i].encryption = WiFi.encryptionType(i);
+        uint8_t* b = WiFi.BSSID(i);
+        if (b) memcpy(result.networks[i].bssid, b, 6);
+        else memset(result.networks[i].bssid, 0, 6);
     }
     WiFi.scanDelete();
     return result;
 }
 
-void WifiScanner::lockNetwork(const String& ssid, uint8_t channel) {
+void WifiScanner::lockNetwork(const String& ssid, uint8_t channel, const uint8_t* bssid) {
     _locked = true;
     _lockedSSID = ssid;
     _lockedChannel = channel;
+    if (bssid) memcpy(_lockedBSSID, bssid, 6);
+    else memset(_lockedBSSID, 0, 6);
     resetStats();
 }
 
