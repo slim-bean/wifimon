@@ -1,6 +1,9 @@
 #include "csi_collector.h"
 #include <WiFi.h>
-#include <WiFiUdp.h>
+#include "lwip/inet_chksum.h"
+#include "lwip/ip.h"
+#include "lwip/raw.h"
+#include "lwip/icmp.h"
 
 static void IRAM_ATTR _promiscRxCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     // No-op — needed so the WiFi stack delivers packets to CSI
@@ -34,44 +37,61 @@ void CSICollector::enableCSI() {
     esp_wifi_set_csi(true);
 }
 
-// --- Traffic generator task: sends UDP packets to gateway to stimulate CSI ---
+// --- Traffic generator task: pings gateway to stimulate CSI ---
+
+// Raw ICMP receive callback (we don't need the replies, just discard)
+static uint8_t _pingRecvCb(void* arg, struct raw_pcb* pcb, struct pbuf* p, const ip_addr_t* addr) {
+    pbuf_free(p);
+    return 1;  // consumed
+}
 
 void CSICollector::_trafficTask(void* param) {
     CSICollector* self = static_cast<CSICollector*>(param);
-    WiFiUDP udp;
 
-    // Wait for connection and gateway
+    // Wait for connection
     while (self->_active && WiFi.status() != WL_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     IPAddress gw = WiFi.gatewayIP();
-    Serial.printf("CSI traffic gen: gateway=%s\n", gw.toString().c_str());
+    Serial.printf("CSI ping gen: gateway=%s\n", gw.toString().c_str());
 
-    // Minimal DNS query (A record for "a") — small, stateless, fast
-    const uint8_t dnsQuery[] = {
-        0x00, 0x01,  // Transaction ID
-        0x01, 0x00,  // Standard query
-        0x00, 0x01,  // 1 question
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // No answers/authority/additional
-        0x01, 0x61,  // QNAME: "a"
-        0x00,        // Root label
-        0x00, 0x01,  // Type A
-        0x00, 0x01,  // Class IN
-    };
+    ip_addr_t target;
+    target.type = IPADDR_TYPE_V4;
+    target.u_addr.ip4.addr = (uint32_t)gw;
 
-    udp.begin(12345);
+    // Create raw ICMP socket
+    struct raw_pcb* pcb = raw_new(IP_PROTO_ICMP);
+    if (!pcb) {
+        Serial.println("CSI: failed to create ICMP pcb");
+        vTaskDelete(nullptr);
+        return;
+    }
+    raw_recv(pcb, _pingRecvCb, nullptr);
+
+    uint16_t seq = 0;
 
     while (self->_active) {
         if (WiFi.status() == WL_CONNECTED) {
-            udp.beginPacket(gw, 53);
-            udp.write(dnsQuery, sizeof(dnsQuery));
-            udp.endPacket();
+            // Build minimal ICMP echo request (8 byte header, no payload)
+            struct pbuf* p = pbuf_alloc(PBUF_IP, sizeof(struct icmp_echo_hdr), PBUF_RAM);
+            if (p) {
+                struct icmp_echo_hdr* hdr = (struct icmp_echo_hdr*)p->payload;
+                ICMPH_TYPE_SET(hdr, ICMP_ECHO);
+                ICMPH_CODE_SET(hdr, 0);
+                hdr->id = htons(0xC5DA);
+                hdr->seqno = htons(seq++);
+                hdr->chksum = 0;
+                hdr->chksum = inet_chksum(hdr, sizeof(struct icmp_echo_hdr));
+
+                raw_sendto(pcb, p, &target);
+                pbuf_free(p);
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));  // ~50 packets/sec
+        vTaskDelay(pdMS_TO_TICKS(20));  // ~50 pings/sec
     }
 
-    udp.stop();
+    raw_remove(pcb);
     vTaskDelete(nullptr);
 }
 
